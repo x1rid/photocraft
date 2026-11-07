@@ -1,0 +1,85 @@
+name: Check for PhotoCraft web update
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get latest release info
+        id: latest
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/storytold/photocraft/releases/latest"
+          json=$(curl -sfL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                       -H "Accept: application/vnd.github+json" "$api")
+
+          tag=$(echo "$json" | jq -r '.tag_name')
+          asset_url=$(echo "$json" | jq -r '.assets[] | select(.name | test("^photocraft-web-.*\\.zip$")) | .browser_download_url')
+          asset_name=$(echo "$json" | jq -r '.assets[] | select(.name | test("^photocraft-web-.*\\.zip$")) | .name')
+
+          if [ -z "$asset_url" ] || [ "$asset_url" = "null" ]; then
+            echo "No photocraft-web-*.zip asset found on latest release ($tag); nothing to do."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(echo "$asset_name" | sed -E 's/^photocraft-web-(.*)\.zip$/\1/')
+
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset_url=$asset_url" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+
+      - name: Compare with currently deployed version
+        id: compare
+        if: steps.latest.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          current="none"
+          if [ -f site/.version ]; then
+            current=$(cat site/.version)
+          fi
+          echo "current=$current"
+          echo "latest=${{ steps.latest.outputs.version }}"
+          if [ "$current" = "${{ steps.latest.outputs.version }}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and unpack new build
+        if: steps.latest.outputs.found == 'true' && steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          curl -sfL -o /tmp/web.zip "${{ steps.latest.outputs.asset_url }}"
+          rm -rf /tmp/extracted
+          mkdir -p /tmp/extracted
+          unzip -q /tmp/web.zip -d /tmp/extracted
+
+          inner_dir=$(find /tmp/extracted -mindepth 1 -maxdepth 1 -type d | head -n1)
+
+          rm -rf site
+          mkdir -p site
+          cp -r "$inner_dir"/. site/
+          echo "${{ steps.latest.outputs.version }}" > site/.version
+
+      - name: Commit and push updated site
+        if: steps.latest.outputs.found == 'true' && steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add site
+          git commit -m "Update PhotoCraft web build to ${{ steps.latest.outputs.version }}"
+          git push
